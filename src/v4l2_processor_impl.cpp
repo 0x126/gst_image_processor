@@ -42,26 +42,40 @@ void V4L2Processor::Impl::detectHardware() {
 }
 
 void V4L2Processor::Impl::calculateTSCOffset() {
-    // Similar to ros2_v4l2_camera implementation
+    // Implementation based on ros2_v4l2_camera for L4T version >= 36
     #if defined(__arm__) || defined(__aarch64__)
     std::ifstream tegra_release("/etc/nv_tegra_release");
     if (tegra_release.good()) {
         tegra_release.close();
         
-        // Try to read offset from sysfs
-        std::ifstream offset_file("/sys/devices/system/clocksource/clocksource0/offset_ns");
-        if (offset_file.good()) {
-            std::string offset;
-            offset_file >> offset;
-            offset_file.close();
-            tsc_offset_ = std::stoull(offset);
-            std::cout << "TSC offset: " << tsc_offset_ << " ns" << std::endl;
-        } else {
-            // Calculate offset using ARM registers (simplified version)
-            tsc_offset_ = 0;
-            std::cout << "Could not read TSC offset, timestamps may be inaccurate" << std::endl;
-        }
+        // Use L4T version >= 36 method with ARM registers
+        unsigned long raw_nsec, tsc_ns;
+        unsigned long cycles, frq;
+        struct timespec tp;
+        
+        // Read ARM timer frequency and cycle count
+        asm volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+        asm volatile("mrs %0, cntvct_el0" : "=r"(cycles));
+        
+        // Get current CLOCK_MONOTONIC_RAW time
+        clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+        
+        // Calculate TSC nanoseconds
+        // Using intermediate calculation to avoid overflow
+        tsc_ns = (cycles * 100 / (frq / 10000)) * 1000;
+        raw_nsec = tp.tv_sec * 1000000000 + tp.tv_nsec;
+        
+        // Calculate absolute difference
+        tsc_offset_ = llabs(tsc_ns - raw_nsec);
+        
+        std::cout << "TSC offset calculated using ARM registers: " << tsc_offset_ << " ns" << std::endl;
+    } else {
+        tsc_offset_ = 0;
+        std::cout << "Not running on Jetson platform, TSC offset set to 0" << std::endl;
     }
+    #else
+    tsc_offset_ = 0;
+    std::cout << "Not ARM architecture, TSC offset set to 0" << std::endl;
     #endif
 }
 
