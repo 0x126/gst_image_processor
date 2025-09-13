@@ -9,6 +9,7 @@
 #include <mutex>
 #include <chrono>
 #include <deque>
+#include <unordered_map>
 
 class V4L2Processor::Impl {
 public:
@@ -33,7 +34,10 @@ private:
     // For Jetson NVMM optimization
     GstElement* nvvidconv_ = nullptr;
     GstElement* nvjpegenc_ = nullptr;
-    
+
+    // For timestamp probe
+    GstElement* v4l2_identity_ = nullptr;
+
     // Configuration
     V4L2ProcessorConfig config_;
     V4L2HardwareType hardware_type_ = V4L2HardwareType::SOFTWARE;
@@ -65,6 +69,17 @@ private:
     int64_t tsc_offset_ = 0;
     void calculateTSCOffset();
     int64_t getTimeOffset();
+
+    // Timestamp cache for probe
+    std::unordered_map<GstBuffer*, int64_t> timestamp_cache_;
+    std::mutex timestamp_cache_mutex_;
+
+    // Probe setup and callback
+    void setupV4L2TimestampProbe();
+    static GstPadProbeReturn onV4L2Buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user_data);
+
+    // L4T version detection
+    bool getL4TMajorVersion(std::string& major_version);
 };
 
 #endif // V4L2_PROCESSOR_IMPL_H

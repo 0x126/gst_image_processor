@@ -4,6 +4,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <cstdlib>
 
 V4L2Processor::Impl::Impl(const V4L2ProcessorConfig& config)
     : config_(config) {
@@ -41,27 +42,71 @@ void V4L2Processor::Impl::detectHardware() {
     }
 }
 
+bool V4L2Processor::Impl::getL4TMajorVersion(std::string& major_version) {
+    std::ifstream tegra_release("/etc/nv_tegra_release");
+    if (!tegra_release.good()) {
+        return false;
+    }
+
+    std::string line;
+    std::getline(tegra_release, line);
+    tegra_release.close();
+
+    // Parse L4T version from the first line
+    // Format: "# R35 (release), REVISION: 3.1, GCID: 32827747, BOARD: t186ref, EABI: aarch64, DATE: Sun Mar 19 15:19:21 UTC 2023"
+    size_t r_pos = line.find("# R");
+    if (r_pos != std::string::npos) {
+        size_t version_start = r_pos + 3;
+        size_t version_end = line.find(' ', version_start);
+        if (version_end != std::string::npos) {
+            major_version = line.substr(version_start, version_end - version_start);
+            return true;
+        }
+    }
+    return false;
+}
+
 void V4L2Processor::Impl::calculateTSCOffset() {
     // Similar to ros2_v4l2_camera implementation
     #if defined(__arm__) || defined(__aarch64__)
-    std::ifstream tegra_release("/etc/nv_tegra_release");
-    if (tegra_release.good()) {
-        tegra_release.close();
-        
-        // Try to read offset from sysfs
-        std::ifstream offset_file("/sys/devices/system/clocksource/clocksource0/offset_ns");
-        if (offset_file.good()) {
-            std::string offset;
-            offset_file >> offset;
-            offset_file.close();
-            tsc_offset_ = std::stoull(offset);
-            std::cout << "TSC offset: " << tsc_offset_ << " ns" << std::endl;
+    std::string l4t_major_version;
+    if (getL4TMajorVersion(l4t_major_version)) {
+        std::cout << "L4T major version: " << l4t_major_version << std::endl;
+
+        if (std::stoi(l4t_major_version) >= 36) {
+            // L4T version >= 36 - use ARM register method
+            unsigned long raw_nsec, tsc_ns;
+            unsigned long cycles, frq;
+            struct timespec tp;
+
+            asm volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+            asm volatile("mrs %0, cntvct_el0" : "=r"(cycles));
+            clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+            tsc_ns = (cycles * 100 / (frq / 10000)) * 1000;
+            raw_nsec = tp.tv_sec * 1000000000 + tp.tv_nsec;
+
+            tsc_offset_ = llabs(tsc_ns - raw_nsec);
+            std::cout << "TSC offset (L4T >= 36): " << tsc_offset_ << " ns" << std::endl;
         } else {
-            // Calculate offset using ARM registers (simplified version)
-            tsc_offset_ = 0;
-            std::cout << "Could not read TSC offset, timestamps may be inaccurate" << std::endl;
+            // L4T version < 36 - try to read from sysfs
+            std::ifstream offset_file("/sys/devices/system/clocksource/clocksource0/offset_ns");
+            if (offset_file.good()) {
+                std::string offset;
+                offset_file >> offset;
+                offset_file.close();
+                tsc_offset_ = std::stoull(offset);
+                std::cout << "TSC offset (from sysfs): " << tsc_offset_ << " ns" << std::endl;
+            } else {
+                tsc_offset_ = 0;
+                std::cout << "Could not read TSC offset, timestamps may be inaccurate" << std::endl;
+            }
         }
+    } else {
+        tsc_offset_ = 0;
+        std::cout << "Not running on Jetson platform, TSC offset = 0" << std::endl;
     }
+    #else
+    tsc_offset_ = 0;
     #endif
 }
 
@@ -92,15 +137,16 @@ bool V4L2Processor::Impl::createSoftwarePipeline() {
         std::cerr << "Failed to create pipeline" << std::endl;
         return false;
     }
-    
+
     // Create elements
     source_ = gst_element_factory_make("v4l2src", "source");
+    v4l2_identity_ = gst_element_factory_make("identity", "v4l2probe");
     capsfilter_ = gst_element_factory_make("capsfilter", "capsfilter");
     converter_ = gst_element_factory_make("videoconvert", "converter");
     encoder_ = gst_element_factory_make("jpegenc", "encoder");
     appsink_ = gst_element_factory_make("appsink", "sink");
-    
-    if (!source_ || !capsfilter_ || !converter_ || !encoder_ || !appsink_) {
+
+    if (!source_ || !v4l2_identity_ || !capsfilter_ || !converter_ || !encoder_ || !appsink_) {
         std::cerr << "Failed to create GStreamer elements" << std::endl;
         return false;
     }
@@ -144,11 +190,11 @@ bool V4L2Processor::Impl::createSoftwarePipeline() {
     
     // Add elements to pipeline
     gst_bin_add_many(GST_BIN(pipeline_),
-                      source_, capsfilter_, converter_, encoder_, appsink_,
+                      source_, v4l2_identity_, capsfilter_, converter_, encoder_, appsink_,
                       nullptr);
-    
+
     // Link elements
-    if (!gst_element_link_many(source_, capsfilter_, converter_, encoder_, appsink_, nullptr)) {
+    if (!gst_element_link_many(source_, v4l2_identity_, capsfilter_, converter_, encoder_, appsink_, nullptr)) {
         std::cerr << "Failed to link elements" << std::endl;
         return false;
     }
@@ -163,15 +209,16 @@ bool V4L2Processor::Impl::createJetsonNVMMPipeline() {
         std::cerr << "Failed to create pipeline" << std::endl;
         return false;
     }
-    
+
     // Create elements
     source_ = gst_element_factory_make("v4l2src", "source");
+    v4l2_identity_ = gst_element_factory_make("identity", "v4l2probe");
     capsfilter_ = gst_element_factory_make("capsfilter", "capsfilter");
     nvvidconv_ = gst_element_factory_make("nvvidconv", "nvvidconv");
     nvjpegenc_ = gst_element_factory_make("nvjpegenc", "nvjpegenc");
     appsink_ = gst_element_factory_make("appsink", "sink");
-    
-    if (!source_ || !capsfilter_ || !nvvidconv_ || !nvjpegenc_ || !appsink_) {
+
+    if (!source_ || !v4l2_identity_ || !capsfilter_ || !nvvidconv_ || !nvjpegenc_ || !appsink_) {
         std::cerr << "Failed to create GStreamer elements for Jetson NVMM" << std::endl;
         // Fallback to software pipeline
         hardware_type_ = V4L2HardwareType::JETSON_SOFTWARE;
@@ -220,11 +267,11 @@ bool V4L2Processor::Impl::createJetsonNVMMPipeline() {
     
     // Add elements to pipeline
     gst_bin_add_many(GST_BIN(pipeline_),
-                      source_, capsfilter_, nvvidconv_, nvjpegenc_, appsink_,
+                      source_, v4l2_identity_, capsfilter_, nvvidconv_, nvjpegenc_, appsink_,
                       nullptr);
-    
+
     // Link elements
-    if (!gst_element_link_many(source_, capsfilter_, nvvidconv_, nvjpegenc_, appsink_, nullptr)) {
+    if (!gst_element_link_many(source_, v4l2_identity_, capsfilter_, nvvidconv_, nvjpegenc_, appsink_, nullptr)) {
         std::cerr << "Failed to link NVMM elements" << std::endl;
         // Try without NVMM
         hardware_type_ = V4L2HardwareType::JETSON_SOFTWARE;
@@ -241,13 +288,16 @@ bool V4L2Processor::Impl::start() {
     if (is_running_) {
         return true;
     }
-    
+
     std::cout << "Creating pipeline..." << std::endl;
     if (!createPipeline()) {
         std::cerr << "Failed to create pipeline" << std::endl;
         return false;
     }
-    
+
+    // Setup V4L2 timestamp probe
+    setupV4L2TimestampProbe();
+
     std::cout << "Starting pipeline..." << std::endl;
     // Start pipeline
     GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
@@ -328,27 +378,72 @@ GstFlowReturn V4L2Processor::Impl::onNewSample(GstAppSink* sink, gpointer user_d
 void V4L2Processor::Impl::processFrame(GstSample* sample) {
     static bool first_frame = true;
     if (first_frame) {
-        std::cout << "First frame received!" << std::endl;
+        std::cout << "First frame received at appsink!" << std::endl;
         first_frame = false;
     }
-    
+
     auto now = std::chrono::steady_clock::now();
-    
+
     GstBuffer* buffer = gst_sample_get_buffer(sample);
     if (!buffer) {
         frames_dropped_++;
         return;
     }
-    
-    // Get buffer timestamp
-    GstClockTime pts = GST_BUFFER_PTS(buffer);
-    
-    // For now, always use current time to avoid timestamp conversion issues
-    // TODO: Fix proper V4L2 timestamp handling
+
+    // Get current system time for reference
     struct timespec system_ts;
     clock_gettime(CLOCK_REALTIME, &system_ts);
     int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
-    int64_t capture_time_ns = system_time_ns;
+
+    int64_t capture_time_ns;
+
+    // Try to get timestamp from cache (set by probe)
+    bool found_in_cache = false;
+    if (config_.use_v4l2_timestamps) {
+        std::lock_guard<std::mutex> lock(timestamp_cache_mutex_);
+        auto it = timestamp_cache_.find(buffer);
+        if (it != timestamp_cache_.end()) {
+            capture_time_ns = it->second;
+            timestamp_cache_.erase(it);  // Remove used timestamp
+            found_in_cache = true;
+
+            // Debug logging for first few frames
+            if (frames_processed_ < 5) {
+                std::cout << "AppSink - Frame " << frames_processed_ << " using cached timestamp:" << std::endl;
+                std::cout << "  Cached timestamp (REALTIME): " << capture_time_ns << " ns" << std::endl;
+                std::cout << "  Current system time: " << system_time_ns << " ns" << std::endl;
+                std::cout << "  End-to-end latency: " << (system_time_ns - capture_time_ns) / 1000000.0 << " ms" << std::endl;
+            }
+        }
+    }
+
+    // Fallback: if not found in cache, try direct PTS conversion or use system time
+    if (!found_in_cache) {
+        GstClockTime pts = GST_BUFFER_PTS(buffer);
+        if (config_.use_v4l2_timestamps && GST_CLOCK_TIME_IS_VALID(pts)) {
+            // This shouldn't happen if probe is working, but provide fallback
+            int64_t monotonic_offset = getTimeOffset();
+            capture_time_ns = pts + monotonic_offset - tsc_offset_;
+            if (frames_processed_ < 5) {
+                std::cout << "AppSink - Frame " << frames_processed_ << " fallback PTS conversion (probe might have failed)" << std::endl;
+            }
+        } else {
+            // Use current system time as last resort
+            capture_time_ns = system_time_ns;
+            if (frames_processed_ < 5) {
+                std::cout << "AppSink - Frame " << frames_processed_ << " using system time (no V4L2 timestamp)" << std::endl;
+            }
+        }
+    }
+
+    // Clean up old entries in cache periodically
+    if (frames_processed_ % 100 == 0 && !timestamp_cache_.empty()) {
+        std::lock_guard<std::mutex> lock(timestamp_cache_mutex_);
+        if (timestamp_cache_.size() > 10) {
+            std::cout << "Warning: timestamp cache has " << timestamp_cache_.size() << " entries, clearing old entries" << std::endl;
+            timestamp_cache_.clear();
+        }
+    }
     
     // Map buffer
     GstMapInfo map;
@@ -389,6 +484,71 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
             latencies_.pop_front();
         }
     }
+}
+
+void V4L2Processor::Impl::setupV4L2TimestampProbe() {
+    if (!v4l2_identity_) {
+        std::cerr << "v4l2_identity element not found, cannot setup probe" << std::endl;
+        return;
+    }
+
+    GstPad* srcpad = gst_element_get_static_pad(v4l2_identity_, "src");
+    if (!srcpad) {
+        std::cerr << "Failed to get srcpad from v4l2_identity" << std::endl;
+        return;
+    }
+
+    // Add probe to capture V4L2 timestamps
+    gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_BUFFER,
+                      onV4L2Buffer, this, nullptr);
+    gst_object_unref(srcpad);
+
+    std::cout << "V4L2 timestamp probe installed" << std::endl;
+}
+
+GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    auto* impl = static_cast<Impl*>(user_data);
+    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+
+    if (!buffer) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    // Get buffer PTS (presentation timestamp)
+    GstClockTime pts = GST_BUFFER_PTS(buffer);
+
+    if (GST_CLOCK_TIME_IS_VALID(pts)) {
+        // Convert MONOTONIC timestamp to REALTIME
+        int64_t monotonic_offset = impl->getTimeOffset();
+        int64_t realtime_ns = pts + monotonic_offset - impl->tsc_offset_;
+
+        // Store timestamp in cache
+        {
+            std::lock_guard<std::mutex> lock(impl->timestamp_cache_mutex_);
+            impl->timestamp_cache_[buffer] = realtime_ns;
+        }
+
+        // Debug logging for first few frames
+        static int debug_frame_count = 0;
+        if (impl->config_.use_v4l2_timestamps && debug_frame_count < 5) {
+            std::cout << "V4L2 Probe - Frame " << debug_frame_count << " timestamp:" << std::endl;
+            std::cout << "  PTS (MONOTONIC): " << pts << " ns" << std::endl;
+            std::cout << "  Monotonic offset: " << monotonic_offset << " ns" << std::endl;
+            std::cout << "  TSC offset: " << impl->tsc_offset_ << " ns" << std::endl;
+            std::cout << "  Converted (REALTIME): " << realtime_ns << " ns" << std::endl;
+
+            // Compare with current time
+            struct timespec system_ts;
+            clock_gettime(CLOCK_REALTIME, &system_ts);
+            int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
+            std::cout << "  Current system time: " << system_time_ns << " ns" << std::endl;
+            std::cout << "  Latency: " << (system_time_ns - realtime_ns) / 1000000.0 << " ms" << std::endl;
+
+            debug_frame_count++;
+        }
+    }
+
+    return GST_PAD_PROBE_OK;
 }
 
 V4L2Processor::Statistics V4L2Processor::Impl::getStatistics() const {
