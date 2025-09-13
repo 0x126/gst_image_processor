@@ -147,7 +147,7 @@ bool V4L2Processor::Impl::createJetsonNVMMPipeline() {
     // Configure v4l2src for NVMM
     g_object_set(source_,
                  "device", config_.device.c_str(),
-                 "io-mode", 2,  // dmabuf for NVMM
+                 "io-mode", config_.io_mode,
                  "do-timestamp", TRUE,
                  nullptr);
     
