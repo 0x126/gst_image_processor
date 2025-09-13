@@ -320,14 +320,21 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
     int64_t capture_time_ns = 0;
     
     if (GST_CLOCK_TIME_IS_VALID(pts)) {
-        capture_time_ns = pts;
+        // GStreamer PTS is in nanoseconds from pipeline start
+        // For V4L2, this should be MONOTONIC time
         
-        // Apply TSC offset correction for Jetson
-        if (hardware_type_ == V4L2HardwareType::JETSON_NVMM || 
-            hardware_type_ == V4L2HardwareType::JETSON_SOFTWARE) {
-            if (config_.use_v4l2_timestamps && tsc_offset_ != 0) {
-                capture_time_ns = pts + getTimeOffset() - tsc_offset_;
-            }
+        if (config_.use_v4l2_timestamps) {
+            // Convert MONOTONIC to REALTIME
+            // PTS is already in MONOTONIC domain, just add offset to get REALTIME
+            capture_time_ns = pts + getTimeOffset();
+            
+            // Note: TSC offset correction might not be needed here since
+            // v4l2src with do-timestamp=true should already provide correct MONOTONIC timestamps
+        } else {
+            // Use current time
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            capture_time_ns = ts.tv_sec * 1000000000LL + ts.tv_nsec;
         }
     } else {
         // Use current time if PTS is not valid
@@ -336,7 +343,7 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
         capture_time_ns = ts.tv_sec * 1000000000LL + ts.tv_nsec;
     }
     
-    // Get system time
+    // Get system time for comparison/debugging
     struct timespec system_ts;
     clock_gettime(CLOCK_REALTIME, &system_ts);
     int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
