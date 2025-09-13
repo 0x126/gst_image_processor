@@ -64,13 +64,12 @@ private:
     void detectHardware();
     static GstFlowReturn onNewSample(GstAppSink* sink, gpointer user_data);
     void processFrame(GstSample* sample);
-    
 
-    // Timestamp cache for probe
-    std::unordered_map<GstBuffer*, int64_t> timestamp_cache_;
+    // Simple timestamp cache (PTS -> realtime_ns)
+    std::unordered_map<uint64_t, int64_t> timestamp_cache_;
     std::mutex timestamp_cache_mutex_;
 
-    // Probe setup and callback
+    // Probe for capturing timestamps at v4l2src output
     void setupV4L2TimestampProbe();
     static GstPadProbeReturn onV4L2Buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user_data);
 };

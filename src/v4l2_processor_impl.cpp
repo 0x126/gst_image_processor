@@ -214,7 +214,7 @@ bool V4L2Processor::Impl::start() {
         return false;
     }
 
-    // Setup V4L2 timestamp probe
+    // Setup probe to capture timestamps right after v4l2src
     setupV4L2TimestampProbe();
 
     std::cout << "Starting pipeline..." << std::endl;
@@ -309,48 +309,29 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
         return;
     }
 
-    // Get current system time for reference
+    // Get current time for comparison
     struct timespec system_ts;
     clock_gettime(CLOCK_REALTIME, &system_ts);
     int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
 
-    int64_t capture_time_ns;
+    // Try to get timestamp from cache (captured at v4l2src output)
+    int64_t capture_time_ns = system_time_ns;  // Default to current time
 
-    // Try to get timestamp from cache (set by probe)
-    bool found_in_cache = false;
-    if (config_.use_v4l2_timestamps) {
+    GstClockTime pts = GST_BUFFER_PTS(buffer);
+    if (config_.use_v4l2_timestamps && GST_CLOCK_TIME_IS_VALID(pts)) {
         std::lock_guard<std::mutex> lock(timestamp_cache_mutex_);
-        auto it = timestamp_cache_.find(buffer);
+        auto it = timestamp_cache_.find(pts);
         if (it != timestamp_cache_.end()) {
             capture_time_ns = it->second;
-            timestamp_cache_.erase(it);  // Remove used timestamp
-            found_in_cache = true;
+            timestamp_cache_.erase(it);  // Remove used entry
 
-            // Debug logging for first few frames
+            // Debug: show latency for first few frames
             if (frames_processed_ < 5) {
-                std::cout << "AppSink - Frame " << frames_processed_ << " using cached timestamp:" << std::endl;
-                std::cout << "  Cached timestamp (REALTIME): " << capture_time_ns << " ns" << std::endl;
-                std::cout << "  Current system time: " << system_time_ns << " ns" << std::endl;
-                std::cout << "  End-to-end latency: " << (system_time_ns - capture_time_ns) / 1000000.0 << " ms" << std::endl;
+                double latency_ms = (system_time_ns - capture_time_ns) / 1000000.0;
+                std::cout << "Frame " << frames_processed_
+                          << ": V4L2 capture to JPEG output latency = "
+                          << latency_ms << " ms" << std::endl;
             }
-        }
-    }
-
-    // Fallback: if not found in cache, use current time
-    if (!found_in_cache) {
-        // Use current system time (frame wasn't caught by probe)
-        capture_time_ns = system_time_ns;
-        if (frames_processed_ < 5) {
-            std::cout << "AppSink - Frame " << frames_processed_ << " using current time (probe cache miss)" << std::endl;
-        }
-    }
-
-    // Clean up old entries in cache periodically
-    if (frames_processed_ % 100 == 0 && !timestamp_cache_.empty()) {
-        std::lock_guard<std::mutex> lock(timestamp_cache_mutex_);
-        if (timestamp_cache_.size() > 10) {
-            std::cout << "Warning: timestamp cache has " << timestamp_cache_.size() << " entries, clearing old entries" << std::endl;
-            timestamp_cache_.clear();
         }
     }
     
@@ -397,8 +378,7 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
 
 void V4L2Processor::Impl::setupV4L2TimestampProbe() {
     if (!v4l2_identity_) {
-        std::cerr << "v4l2_identity element not found, cannot setup probe" << std::endl;
-        return;
+        return;  // identity element not created (shouldn't happen)
     }
 
     GstPad* srcpad = gst_element_get_static_pad(v4l2_identity_, "src");
@@ -407,15 +387,13 @@ void V4L2Processor::Impl::setupV4L2TimestampProbe() {
         return;
     }
 
-    // Add probe to capture V4L2 timestamps
+    // Add probe to capture timestamps right after v4l2src
     gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_BUFFER,
                       onV4L2Buffer, this, nullptr);
     gst_object_unref(srcpad);
-
-    std::cout << "V4L2 timestamp probe installed" << std::endl;
 }
 
-GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* /*pad*/, GstPadProbeInfo* info, gpointer user_data) {
     auto* impl = static_cast<Impl*>(user_data);
     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
 
@@ -423,29 +401,28 @@ GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* pad, GstPadProbeInfo
         return GST_PAD_PROBE_OK;
     }
 
-    // Get buffer PTS (presentation timestamp)
+    // Get PTS for this buffer
     GstClockTime pts = GST_BUFFER_PTS(buffer);
+    if (!GST_CLOCK_TIME_IS_VALID(pts)) {
+        return GST_PAD_PROBE_OK;
+    }
 
-    if (GST_CLOCK_TIME_IS_VALID(pts)) {
-        // Simply use current time when frame is received from V4L2
-        struct timespec current_ts;
-        clock_gettime(CLOCK_REALTIME, &current_ts);
-        int64_t realtime_ns = current_ts.tv_sec * 1000000000LL + current_ts.tv_nsec;
+    // Capture current time when frame arrives from V4L2
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t realtime_ns = ts.tv_sec * 1000000000LL + ts.tv_nsec;
 
-        // Store timestamp in cache
-        {
-            std::lock_guard<std::mutex> lock(impl->timestamp_cache_mutex_);
-            impl->timestamp_cache_[buffer] = realtime_ns;
-        }
+    // Store in cache using PTS as key
+    {
+        std::lock_guard<std::mutex> lock(impl->timestamp_cache_mutex_);
+        impl->timestamp_cache_[pts] = realtime_ns;
 
-        // Debug logging for first few frames
-        static int debug_frame_count = 0;
-        if (impl->config_.use_v4l2_timestamps && debug_frame_count < 5) {
-            std::cout << "V4L2 Probe - Frame " << debug_frame_count << " timestamp:" << std::endl;
-            std::cout << "  PTS (GStreamer): " << pts << " ns" << std::endl;
-            std::cout << "  Frame received at (REALTIME): " << realtime_ns << " ns" << std::endl;
-
-            debug_frame_count++;
+        // Clean up old entries if cache gets too large
+        if (impl->timestamp_cache_.size() > 30) {
+            // Remove oldest entries (simple cleanup - in production, use LRU)
+            auto it = impl->timestamp_cache_.begin();
+            std::advance(it, 10);
+            impl->timestamp_cache_.erase(impl->timestamp_cache_.begin(), it);
         }
     }
 
