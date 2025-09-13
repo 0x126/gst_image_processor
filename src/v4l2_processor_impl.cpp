@@ -342,29 +342,13 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
     
     // Get buffer timestamp
     GstClockTime pts = GST_BUFFER_PTS(buffer);
-    int64_t capture_time_ns = 0;
     
-    if (GST_CLOCK_TIME_IS_VALID(pts)) {
-        capture_time_ns = pts;
-        
-        // Apply TSC offset correction for Jetson
-        if (hardware_type_ == V4L2HardwareType::JETSON_NVMM || 
-            hardware_type_ == V4L2HardwareType::JETSON_SOFTWARE) {
-            if (config_.use_v4l2_timestamps && tsc_offset_ != 0) {
-                capture_time_ns = pts + getTimeOffset() - tsc_offset_;
-            }
-        }
-    } else {
-        // Use current time if PTS is not valid
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        capture_time_ns = ts.tv_sec * 1000000000LL + ts.tv_nsec;
-    }
-    
-    // Get system time
+    // For now, always use current time to avoid timestamp conversion issues
+    // TODO: Fix proper V4L2 timestamp handling
     struct timespec system_ts;
     clock_gettime(CLOCK_REALTIME, &system_ts);
     int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
+    int64_t capture_time_ns = system_time_ns;
     
     // Map buffer
     GstMapInfo map;
