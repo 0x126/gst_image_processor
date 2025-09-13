@@ -186,7 +186,7 @@ bool V4L2Processor::Impl::createJetsonNVMMPipeline() {
                  nullptr);
     
     // Set caps for v4l2src with NVMM memory
-    std::string caps_string = "video/x-raw(memory:NVMM)"
+    std::string caps_string = "video/x-raw"
                              ", width=" + std::to_string(config_.width) +
                              ", height=" + std::to_string(config_.height) +
                              ", framerate=" + std::to_string(config_.framerate_num) + 
@@ -242,19 +242,51 @@ bool V4L2Processor::Impl::start() {
         return true;
     }
     
+    std::cout << "Creating pipeline..." << std::endl;
     if (!createPipeline()) {
+        std::cerr << "Failed to create pipeline" << std::endl;
         return false;
     }
     
+    std::cout << "Starting pipeline..." << std::endl;
     // Start pipeline
     GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         std::cerr << "Failed to start pipeline" << std::endl;
+        
+        // Get error details
+        GstBus* bus = gst_element_get_bus(pipeline_);
+        GstMessage* msg = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR);
+        if (msg != nullptr) {
+            GError* err;
+            gchar* debug_info;
+            gst_message_parse_error(msg, &err, &debug_info);
+            std::cerr << "Error: " << err->message << std::endl;
+            std::cerr << "Debug info: " << debug_info << std::endl;
+            g_clear_error(&err);
+            g_free(debug_info);
+            gst_message_unref(msg);
+        }
+        gst_object_unref(bus);
+        
         gst_object_unref(pipeline_);
         pipeline_ = nullptr;
         return false;
     }
     
+    // Wait for pipeline to reach playing state
+    GstState state;
+    GstState pending;
+    ret = gst_element_get_state(pipeline_, &state, &pending, 5 * GST_SECOND);
+    if (ret == GST_STATE_CHANGE_FAILURE) {
+        std::cerr << "Pipeline failed to reach PLAYING state" << std::endl;
+        gst_element_set_state(pipeline_, GST_STATE_NULL);
+        gst_object_unref(pipeline_);
+        pipeline_ = nullptr;
+        return false;
+    }
+    
+    std::cout << "Pipeline started successfully" << std::endl;
     is_running_ = true;
     start_time_ = std::chrono::steady_clock::now();
     
@@ -286,12 +318,20 @@ GstFlowReturn V4L2Processor::Impl::onNewSample(GstAppSink* sink, gpointer user_d
     if (sample) {
         impl->processFrame(sample);
         gst_sample_unref(sample);
+    } else {
+        std::cerr << "No sample received from appsink" << std::endl;
     }
     
     return GST_FLOW_OK;
 }
 
 void V4L2Processor::Impl::processFrame(GstSample* sample) {
+    static bool first_frame = true;
+    if (first_frame) {
+        std::cout << "First frame received!" << std::endl;
+        first_frame = false;
+    }
+    
     auto now = std::chrono::steady_clock::now();
     
     GstBuffer* buffer = gst_sample_get_buffer(sample);
