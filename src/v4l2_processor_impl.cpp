@@ -61,7 +61,6 @@ void V4L2Processor::Impl::calculateTSCOffset() {
         clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
         
         // Calculate TSC nanoseconds
-        // Using intermediate calculation to avoid overflow
         tsc_ns = (cycles * 100 / (frq / 10000)) * 1000;
         raw_nsec = tp.tv_sec * 1000000000 + tp.tv_nsec;
         
@@ -69,6 +68,11 @@ void V4L2Processor::Impl::calculateTSCOffset() {
         tsc_offset_ = llabs(tsc_ns - raw_nsec);
         
         std::cout << "TSC offset calculated using ARM registers: " << tsc_offset_ << " ns" << std::endl;
+        std::cout << "  Frequency: " << frq << " Hz" << std::endl;
+        std::cout << "  Cycles: " << cycles << std::endl;
+        std::cout << "  TSC ns: " << tsc_ns << std::endl;
+        std::cout << "  Monotonic RAW ns: " << raw_nsec << std::endl;
+        std::cout << "  Offset: " << tsc_offset_ << " ns (" << tsc_offset_ / 1000000000 << " seconds)" << std::endl;
     } else {
         tsc_offset_ = 0;
         std::cout << "Not running on Jetson platform, TSC offset set to 0" << std::endl;
@@ -80,15 +84,12 @@ void V4L2Processor::Impl::calculateTSCOffset() {
 }
 
 int64_t V4L2Processor::Impl::getTimeOffset() {
-    // Get monotonic clock offset
-    struct timespec system_time, monotonic_time;
-    clock_gettime(CLOCK_REALTIME, &system_time);
-    clock_gettime(CLOCK_MONOTONIC, &monotonic_time);
-    
-    int64_t system_ns = system_time.tv_sec * 1000000000LL + system_time.tv_nsec;
-    int64_t monotonic_ns = monotonic_time.tv_sec * 1000000000LL + monotonic_time.tv_nsec;
-    
-    return system_ns - monotonic_ns;
+    // Get time offset between REALTIME and MONOTONIC_RAW
+    timespec system_sample, monotonic_sample;
+    clock_gettime(CLOCK_REALTIME, &system_sample);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &monotonic_sample);
+    return (static_cast<int64_t>(system_sample.tv_sec * 1e9) - static_cast<int64_t>(monotonic_sample.tv_sec * 1e9)
+            + static_cast<int64_t>(system_sample.tv_nsec) - static_cast<int64_t>(monotonic_sample.tv_nsec));
 }
 
 bool V4L2Processor::Impl::createPipeline() {
