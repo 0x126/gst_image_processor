@@ -25,7 +25,7 @@ def generate_launch_description():
     
     framerate_arg = DeclareLaunchArgument(
         'framerate',
-        default_value='20',
+        default_value='30',
         description='Frame rate'
     )
     

@@ -4,7 +4,7 @@
   <arg name="device" default="/dev/video0" description="V4L2 device path"/>
   <arg name="width" default="2880" description="Image width"/>
   <arg name="height" default="1860" description="Image height"/>
-  <arg name="framerate" default="20" description="Frame rate"/>
+  <arg name="framerate" default="30" description="Frame rate"/>
   <arg name="format" default="UYVY" description="V4L2 format (UYVY, YUYV, etc.)"/>
   <arg name="use_nvmm" default="true" description="Use NVIDIA Memory Management (Jetson only)"/>
   <arg name="io_mode" default="2" description="V4L2 IO mode (0: mmap, 2: dmabuf for NVMM)"/>
