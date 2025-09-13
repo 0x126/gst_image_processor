@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Launch arguments -->
+  <arg name="device" default="/dev/video0" description="V4L2 device path"/>
+  <arg name="width" default="2880" description="Image width"/>
+  <arg name="height" default="1860" description="Image height"/>
+  <arg name="framerate" default="20" description="Frame rate"/>
+  <arg name="format" default="UYVY" description="V4L2 format (UYVY, YUYV, etc.)"/>
+  <arg name="use_nvmm" default="true" description="Use NVIDIA Memory Management (Jetson only)"/>
+  <arg name="io_mode" default="2" description="V4L2 IO mode (0: mmap, 2: dmabuf for NVMM)"/>
+  <arg name="jpeg_quality" default="80" description="JPEG compression quality (1-100)"/>
+  <arg name="publish_raw" default="false" description="Publish raw images"/>
+  <arg name="publish_compressed" default="true" description="Publish compressed images"/>
+  <arg name="frame_id" default="camera" description="Frame ID for the camera"/>
+  <arg name="camera_info_url" default="" description="URL for camera calibration file"/>
+  <arg name="use_v4l2_timestamps" default="true" description="Use V4L2 buffer timestamps"/>
+  <arg name="buffer_size" default="8388608" description="Buffer size in bytes"/>
+  <arg name="max_buffers" default="3" description="Maximum number of buffers"/>
+
+  <!-- GST Image Processor Node -->
+  <node pkg="gst_image_processor" exec="gst_image_processor_node" name="gst_image_processor" output="screen">
+    <param name="device" value="$(var device)"/>
+    <param name="width" value="$(var width)"/>
+    <param name="height" value="$(var height)"/>
+    <param name="framerate" value="$(var framerate)"/>
+    <param name="format" value="$(var format)"/>
+    <param name="use_nvmm" value="$(var use_nvmm)"/>
+    <param name="io_mode" value="$(var io_mode)"/>
+    <param name="jpeg_quality" value="$(var jpeg_quality)"/>
+    <param name="publish_raw" value="$(var publish_raw)"/>
+    <param name="publish_compressed" value="$(var publish_compressed)"/>
+    <param name="frame_id" value="$(var frame_id)"/>
+    <param name="camera_info_url" value="$(var camera_info_url)"/>
+    <param name="use_v4l2_timestamps" value="$(var use_v4l2_timestamps)"/>
+    <param name="buffer_size" value="$(var buffer_size)"/>
+    <param name="max_buffers" value="$(var max_buffers)"/>
+  </node>
+</launch>
