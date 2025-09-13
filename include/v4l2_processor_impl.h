@@ -65,10 +65,6 @@ private:
     static GstFlowReturn onNewSample(GstAppSink* sink, gpointer user_data);
     void processFrame(GstSample* sample);
     
-    // TSC offset for Jetson timestamp correction
-    int64_t tsc_offset_ = 0;
-    void calculateTSCOffset();
-    int64_t getTimeOffset();
 
     // Timestamp cache for probe
     std::unordered_map<GstBuffer*, int64_t> timestamp_cache_;
@@ -77,9 +73,6 @@ private:
     // Probe setup and callback
     void setupV4L2TimestampProbe();
     static GstPadProbeReturn onV4L2Buffer(GstPad* pad, GstPadProbeInfo* info, gpointer user_data);
-
-    // L4T version detection
-    bool getL4TMajorVersion(std::string& major_version);
 };
 
 #endif // V4L2_PROCESSOR_IMPL_H

@@ -10,7 +10,6 @@ V4L2Processor::Impl::Impl(const V4L2ProcessorConfig& config)
     : config_(config) {
     gst_init(nullptr, nullptr);
     detectHardware();
-    calculateTSCOffset();
 }
 
 V4L2Processor::Impl::~Impl() {
@@ -40,86 +39,6 @@ void V4L2Processor::Impl::detectHardware() {
         hardware_type_ = V4L2HardwareType::SOFTWARE;
         std::cout << "Using software processing" << std::endl;
     }
-}
-
-bool V4L2Processor::Impl::getL4TMajorVersion(std::string& major_version) {
-    std::ifstream tegra_release("/etc/nv_tegra_release");
-    if (!tegra_release.good()) {
-        return false;
-    }
-
-    std::string line;
-    std::getline(tegra_release, line);
-    tegra_release.close();
-
-    // Parse L4T version from the first line
-    // Format: "# R35 (release), REVISION: 3.1, GCID: 32827747, BOARD: t186ref, EABI: aarch64, DATE: Sun Mar 19 15:19:21 UTC 2023"
-    size_t r_pos = line.find("# R");
-    if (r_pos != std::string::npos) {
-        size_t version_start = r_pos + 3;
-        size_t version_end = line.find(' ', version_start);
-        if (version_end != std::string::npos) {
-            major_version = line.substr(version_start, version_end - version_start);
-            return true;
-        }
-    }
-    return false;
-}
-
-void V4L2Processor::Impl::calculateTSCOffset() {
-    // Similar to ros2_v4l2_camera implementation
-    #if defined(__arm__) || defined(__aarch64__)
-    std::string l4t_major_version;
-    if (getL4TMajorVersion(l4t_major_version)) {
-        std::cout << "L4T major version: " << l4t_major_version << std::endl;
-
-        if (std::stoi(l4t_major_version) >= 36) {
-            // L4T version >= 36 - use ARM register method
-            unsigned long raw_nsec, tsc_ns;
-            unsigned long cycles, frq;
-            struct timespec tp;
-
-            asm volatile("mrs %0, cntfrq_el0" : "=r"(frq));
-            asm volatile("mrs %0, cntvct_el0" : "=r"(cycles));
-            clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
-            tsc_ns = (cycles * 100 / (frq / 10000)) * 1000;
-            raw_nsec = tp.tv_sec * 1000000000 + tp.tv_nsec;
-
-            tsc_offset_ = llabs(tsc_ns - raw_nsec);
-            std::cout << "TSC offset (L4T >= 36): " << tsc_offset_ << " ns" << std::endl;
-        } else {
-            // L4T version < 36 - try to read from sysfs
-            std::ifstream offset_file("/sys/devices/system/clocksource/clocksource0/offset_ns");
-            if (offset_file.good()) {
-                std::string offset;
-                offset_file >> offset;
-                offset_file.close();
-                tsc_offset_ = std::stoull(offset);
-                std::cout << "TSC offset (from sysfs): " << tsc_offset_ << " ns" << std::endl;
-            } else {
-                tsc_offset_ = 0;
-                std::cout << "Could not read TSC offset, timestamps may be inaccurate" << std::endl;
-            }
-        }
-    } else {
-        tsc_offset_ = 0;
-        std::cout << "Not running on Jetson platform, TSC offset = 0" << std::endl;
-    }
-    #else
-    tsc_offset_ = 0;
-    #endif
-}
-
-int64_t V4L2Processor::Impl::getTimeOffset() {
-    // Get monotonic clock offset
-    struct timespec system_time, monotonic_time;
-    clock_gettime(CLOCK_REALTIME, &system_time);
-    clock_gettime(CLOCK_MONOTONIC, &monotonic_time);
-    
-    int64_t system_ns = system_time.tv_sec * 1000000000LL + system_time.tv_nsec;
-    int64_t monotonic_ns = monotonic_time.tv_sec * 1000000000LL + monotonic_time.tv_nsec;
-    
-    return system_ns - monotonic_ns;
 }
 
 bool V4L2Processor::Impl::createPipeline() {
@@ -417,22 +336,12 @@ void V4L2Processor::Impl::processFrame(GstSample* sample) {
         }
     }
 
-    // Fallback: if not found in cache, try direct PTS conversion or use system time
+    // Fallback: if not found in cache, use current time
     if (!found_in_cache) {
-        GstClockTime pts = GST_BUFFER_PTS(buffer);
-        if (config_.use_v4l2_timestamps && GST_CLOCK_TIME_IS_VALID(pts)) {
-            // This shouldn't happen if probe is working, but provide fallback
-            int64_t monotonic_offset = getTimeOffset();
-            capture_time_ns = pts + monotonic_offset - tsc_offset_;
-            if (frames_processed_ < 5) {
-                std::cout << "AppSink - Frame " << frames_processed_ << " fallback PTS conversion (probe might have failed)" << std::endl;
-            }
-        } else {
-            // Use current system time as last resort
-            capture_time_ns = system_time_ns;
-            if (frames_processed_ < 5) {
-                std::cout << "AppSink - Frame " << frames_processed_ << " using system time (no V4L2 timestamp)" << std::endl;
-            }
+        // Use current system time (frame wasn't caught by probe)
+        capture_time_ns = system_time_ns;
+        if (frames_processed_ < 5) {
+            std::cout << "AppSink - Frame " << frames_processed_ << " using current time (probe cache miss)" << std::endl;
         }
     }
 
@@ -518,9 +427,10 @@ GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* pad, GstPadProbeInfo
     GstClockTime pts = GST_BUFFER_PTS(buffer);
 
     if (GST_CLOCK_TIME_IS_VALID(pts)) {
-        // Convert MONOTONIC timestamp to REALTIME
-        int64_t monotonic_offset = impl->getTimeOffset();
-        int64_t realtime_ns = pts + monotonic_offset - impl->tsc_offset_;
+        // Simply use current time when frame is received from V4L2
+        struct timespec current_ts;
+        clock_gettime(CLOCK_REALTIME, &current_ts);
+        int64_t realtime_ns = current_ts.tv_sec * 1000000000LL + current_ts.tv_nsec;
 
         // Store timestamp in cache
         {
@@ -532,17 +442,8 @@ GstPadProbeReturn V4L2Processor::Impl::onV4L2Buffer(GstPad* pad, GstPadProbeInfo
         static int debug_frame_count = 0;
         if (impl->config_.use_v4l2_timestamps && debug_frame_count < 5) {
             std::cout << "V4L2 Probe - Frame " << debug_frame_count << " timestamp:" << std::endl;
-            std::cout << "  PTS (MONOTONIC): " << pts << " ns" << std::endl;
-            std::cout << "  Monotonic offset: " << monotonic_offset << " ns" << std::endl;
-            std::cout << "  TSC offset: " << impl->tsc_offset_ << " ns" << std::endl;
-            std::cout << "  Converted (REALTIME): " << realtime_ns << " ns" << std::endl;
-
-            // Compare with current time
-            struct timespec system_ts;
-            clock_gettime(CLOCK_REALTIME, &system_ts);
-            int64_t system_time_ns = system_ts.tv_sec * 1000000000LL + system_ts.tv_nsec;
-            std::cout << "  Current system time: " << system_time_ns << " ns" << std::endl;
-            std::cout << "  Latency: " << (system_time_ns - realtime_ns) / 1000000.0 << " ms" << std::endl;
+            std::cout << "  PTS (GStreamer): " << pts << " ns" << std::endl;
+            std::cout << "  Frame received at (REALTIME): " << realtime_ns << " ns" << std::endl;
 
             debug_frame_count++;
         }
