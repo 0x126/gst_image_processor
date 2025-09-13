@@ -12,7 +12,7 @@
   <arg name="publish_raw" default="false" description="Publish raw images"/>
   <arg name="publish_compressed" default="true" description="Publish compressed images"/>
   <arg name="frame_id" default="camera" description="Frame ID for the camera"/>
-  <arg name="camera_info_url" default="" description="URL for camera calibration file"/>
+  <arg name="camera_info_url" default="package://gst_image_processor/config/camera_info.yaml" description="URL for camera calibration file"/>
   <arg name="use_v4l2_timestamps" default="true" description="Use V4L2 buffer timestamps"/>
   <arg name="buffer_size" default="8388608" description="Buffer size in bytes"/>
   <arg name="max_buffers" default="3" description="Maximum number of buffers"/>
