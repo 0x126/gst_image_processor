@@ -25,7 +25,7 @@ def generate_launch_description():
     
     framerate_arg = DeclareLaunchArgument(
         'framerate',
-        default_value='20',
+        default_value='30',
         description='Frame rate'
     )
     
@@ -43,7 +43,7 @@ def generate_launch_description():
     
     io_mode_arg = DeclareLaunchArgument(
         'io_mode',
-        default_value='0',
+        default_value='4',
         description='V4L2 IO mode (0: mmap, 2: dmabuf for NVMM)'
     )
     

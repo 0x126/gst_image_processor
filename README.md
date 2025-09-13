@@ -66,10 +66,10 @@ ros2 run gst_image_processor gst_image_processor_node --ros-args \
 | `device` | string | `/dev/video0` | V4L2 device path |
 | `width` | int | `2880` | Image width |
 | `height` | int | `1860` | Image height |
-| `framerate` | int | `20` | Frame rate |
+| `framerate` | int | `30` | Frame rate |
 | `format` | string | `UYVY` | V4L2 format (UYVY, YUYV, etc.) |
 | `use_nvmm` | bool | `false` | Enable NVIDIA Memory Management (Jetson only) |
-| `io_mode` | int | `0` | V4L2 IO mode (0: mmap, 2: dmabuf for NVMM) |
+| `io_mode` | int | `2` | V4L2 IO mode (0: auto, 2: mmap, 4: dmabuf) |
 | `jpeg_quality` | int | `90` | JPEG compression quality (1-100) |
 | `publish_raw` | bool | `false` | Publish raw images |
 | `publish_compressed` | bool | `true` | Publish compressed images |
